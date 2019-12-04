@@ -3,7 +3,6 @@ use diesel::r2d2::{self, ConnectionManager, Pool, PooledConnection};
 use std::time::{Duration, Instant};
 
 use graph::prelude::*;
-use graph::serde_json;
 use graph::util::security::SafeDisplay;
 
 use crate::entities as e;

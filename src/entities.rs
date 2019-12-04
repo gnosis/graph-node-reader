@@ -32,9 +32,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use graph::prelude::{
-    format_err, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
+    serde_json, format_err, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
 };
-use graph::serde_json;
 
 use crate::filter::store_filter;
 

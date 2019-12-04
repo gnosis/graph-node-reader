@@ -8,8 +8,7 @@ use std::str::FromStr;
 
 use graph::components::store::EntityFilter;
 use graph::data::store::*;
-use graph::prelude::{BigDecimal, BigInt};
-use graph::serde_json;
+use graph::prelude::{serde_json, BigDecimal, BigInt};
 
 use crate::entities::EntitySource;
 use crate::sql_value::SqlValue;
@@ -20,7 +19,7 @@ pub(crate) struct UnsupportedFilter {
     pub value: Value,
 }
 
-type FilterExpression<QS> = Box<BoxableExpression<QS, Pg, SqlType = Bool>>;
+type FilterExpression<QS> = Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>;
 
 trait IntoFilter<QS> {
     fn into_filter(self, attribute: String, op: &str) -> FilterExpression<QS>;
