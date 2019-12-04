@@ -19,20 +19,20 @@
 // constant. As a consequence, a lot of Diesel functionality is not available
 // for dynamic tables.
 
+use diesel::debug_query;
 use diesel::deserialize::QueryableByName;
 use diesel::dsl::{any, sql};
 use diesel::pg::{Pg, PgConnection};
 use diesel::sql_types::{Jsonb, Nullable, Text};
 use diesel::BoolExpressionMethods;
 use diesel::ExpressionMethods;
-use diesel::{debug_query};
 use diesel::{OptionalExtension, QueryDsl, RunQueryDsl};
 use diesel_dynamic_schema::{schema, Column, Table as DynamicTable};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use graph::prelude::{
-    serde_json, format_err, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
+    format_err, serde_json, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
 };
 
 use crate::filter::store_filter;
@@ -392,7 +392,6 @@ impl SplitTable {
 }
 
 impl Table {
-
     /// Look up the schema for `subgraph` and return its entity table.
     /// Returns an error if `subgraph` does not have an entry in
     /// `deployment_schemas`, which can only happen if `create_schema` was not

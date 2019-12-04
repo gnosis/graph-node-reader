@@ -15,10 +15,7 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn new(
-        postgres_url: String,
-        logger: &Logger,
-    ) -> Self {
+    pub fn new(postgres_url: String, logger: &Logger) -> Self {
         // Create a store-specific logger
         let logger = logger.new(o!("component" => "Store"));
 
@@ -172,7 +169,6 @@ pub trait StoreReader: Send + Sync + 'static {
 }
 
 impl StoreReader for Store {
-
     fn get(&self, key: EntityKey) -> Result<Option<Entity>, QueryExecutionError> {
         let conn = self
             .get_conn()
