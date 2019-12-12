@@ -23,57 +23,39 @@ use diesel::debug_query;
 use diesel::deserialize::QueryableByName;
 use diesel::dsl::{any, sql};
 use diesel::pg::{Pg, PgConnection};
+use diesel::r2d2::{ConnectionManager, PooledConnection};
 use diesel::sql_types::{Jsonb, Nullable, Text};
 use diesel::BoolExpressionMethods;
 use diesel::ExpressionMethods;
 use diesel::{OptionalExtension, QueryDsl, RunQueryDsl};
-use diesel_dynamic_schema::{schema, Column, Table as DynamicTable};
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use graph::prelude::{
+use graph::prelude::{Entity,ValueType, 
     format_err, serde_json, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
 };
+use graph::components::store::SubgraphDeploymentStore;
 
-use crate::filter::store_filter;
+use crate::block_range::BlockNumber;
+use crate::filter::{build_filter};
+use crate::relational::{IdType, Layout};
+use crate::store::Store;
+
+/// The size of string prefixes that we index. This is chosen so that we
+/// will index strings that people will do string comparisons like
+/// `=` or `!=` on; if text longer than this is stored in a String attribute
+/// it is highly unlikely that they will be used for exact string operations.
+/// This also makes sure that we do not put strings into a BTree index that's
+/// bigger than Postgres' limit on such strings which is about 2k
+pub const STRING_PREFIX_SIZE: usize = 256;
 
 /// Marker trait for tables that store entities
 pub(crate) trait EntitySource {}
 
-// The entities and related tables in the public schema. We put them in
-// this module to make sure that nobody else gets access to them. All access
-// to these tables must go through functions in this module.
+// Tables in the public schema that are shared across subgraphs. We put them
+// in this module to make sure that nobody else gets access to them. All
+// access to these tables must go through functions in this module.
 mod public {
-    use diesel::sql_types::Varchar;
-
-    table! {
-        entities (id, subgraph, entity) {
-            id -> Varchar,
-            subgraph -> Varchar,
-            entity -> Varchar,
-            data -> Jsonb,
-            event_source -> Varchar,
-        }
-    }
-
-    table! {
-        entity_history (id) {
-            id -> Integer,
-            // This is a BigInt in the database, but if we mark it that
-            // diesel won't let us join event_meta_data and entity_history
-            // Since event_meta_data.id is Integer, it shouldn't matter
-            // that we call it Integer here
-            event_id -> Integer,
-            entity_id -> Varchar,
-            subgraph -> Varchar,
-            entity -> Varchar,
-            data_before -> Nullable<Jsonb>,
-            data_after -> Nullable<Jsonb>,
-            op_id -> SmallInt,
-            reversion -> Bool,
-        }
-    }
-
     table! {
         event_meta_data (id) {
             id -> Integer,
@@ -83,27 +65,24 @@ mod public {
         }
     }
 
-    joinable!(entity_history -> event_meta_data (event_id));
-    allow_tables_to_appear_in_same_query!(entity_history, event_meta_data);
-
     /// We support different storage schemes per subgraph. This enum is used
     /// to track which scheme a given subgraph uses and corresponds to the
     /// `deployment_schema_version` type in the database.
     ///
     /// The column `deployment_schemas.version` stores that information for
-    /// each subgraph. Subgraphs that use the `Public` scheme have their
-    /// entities stored in the monolithic `public.entities` table, subgraphs
-    /// that store their entities and history in a dedicated database schema
-    /// are marked with version `Split`.
+    /// each subgraph. Subgraphs that store their entities and history as
+    /// JSONB blobs with a separate history table are marked with version
+    /// `Split`. Subgraphs that use a relational schema for entities, and
+    /// store their history in the same table are marked as 'Relational'
     ///
     /// Migrating a subgraph amounts to changing the storage scheme for that
     /// subgraph from one version to another. Whether a subgraph scheme needs
     /// migrating is determined by `Table::needs_migrating`, the migration
     /// machinery is kicked off with a call to `Connection::migrate`
-    #[derive(DbEnum, Debug, Clone)]
+    #[derive(DbEnum, Debug, Clone, Copy)]
     pub enum DeploymentSchemaVersion {
-        Public,
         Split,
+        Relational,
     }
 
     /// Migrating a subgraph is broken into two steps: in the first step, the
@@ -111,13 +90,8 @@ mod public {
     /// step data is moved from the old storage scheme to the new one. These
     /// two steps happen in separate database transactions, since the first
     /// step takes fairly strong locks, that can block other database work.
-    /// In the case of the `Public -> Split` migration, the schema changes
-    /// take a lock on `event_meta_data`, which, if held for too long, ends up
-    /// blocking any write access to the `public.entities` table because of
-    /// the way in which history is recorded. The second step, moving data,
-    /// only requires relatively weak locks that do not block write activity
-    /// to rows in `public.entities` that are not affected by the migration
-    /// of a different subgraph.
+    /// The second step, moving data, only requires relatively weak locks
+    /// that do not block write activity in other subgraphs.
     ///
     /// The `Ready` state indicates that the subgraph is ready to use the
     /// storage scheme indicated by `deployment_schemas.version`. After the
@@ -150,11 +124,6 @@ mod public {
             state -> crate::entities::public::DeploymentSchemaStateMapping,
         }
     }
-
-    // Migrate entities storage to a split entities table, one stored proc
-    // for each migration step
-    sql_function!(fn migrate_entities_tables(schema_name: Varchar, schema_version: DeploymentSchemaVersionMapping, subgraph: Varchar));
-    sql_function!(fn migrate_entities_data(schema_name: Varchar, schema_version: DeploymentSchemaVersionMapping, subgraph: Varchar) -> Integer);
 }
 
 // The entities table for the subgraph of subgraphs.
@@ -201,12 +170,14 @@ mod subgraphs {
     allow_tables_to_appear_in_same_query!(entity_history, event_meta_data);
 }
 
-impl EntitySource for self::public::entities::table {}
-
 impl EntitySource for self::subgraphs::entities::table {}
 
+pub(crate) type EntityTable = diesel_dynamic_schema::Table<String>;
+
+pub(crate) type EntityColumn<ST> = diesel_dynamic_schema::Column<EntityTable, String, ST>;
+
 // This is a bit weak, as any DynamicTable<String> is now an EntitySource
-impl EntitySource for DynamicTable<String> {}
+impl EntitySource for EntityTable {}
 
 use public::deployment_schemas;
 
@@ -250,22 +221,26 @@ struct Schema {
     state: public::DeploymentSchemaState,
 }
 
-type EntityColumn<ST> = Column<DynamicTable<String>, String, ST>;
-
-/// A table representing a split entities table, i.e. a setup where
-/// a subgraph deployment's entities are split into their own schema rather
-/// than residing in the entities table in the `public` database schema
+/// Storage using JSONB for entities. All entities are stored in one table
 #[derive(Debug, Clone)]
-pub(crate) struct SplitTable {
+pub(crate) struct JsonStorage {
     /// The name of the database schema
     schema: String,
     /// The subgraph id
     subgraph: SubgraphDeploymentId,
-    table: DynamicTable<String>,
+    table: EntityTable,
     id: EntityColumn<diesel::sql_types::Text>,
     entity: EntityColumn<diesel::sql_types::Text>,
     data: EntityColumn<diesel::sql_types::Jsonb>,
     event_source: EntityColumn<diesel::sql_types::Text>,
+    // The query to count all entities
+    count_query: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Storage {
+    Json(JsonStorage),
+    Relational(Layout),
 }
 
 /// Helper struct to support a custom query for entity history
@@ -294,13 +269,13 @@ impl QueryableByName<Pg> for RawHistory {
     }
 }
 
-/// Represents a subgraph, and how it is stored in the database. The
-/// implementation of this enum masks which scheme is used to the rest of
-/// the code.
-#[derive(Clone, Debug)]
-pub(crate) enum Table {
-    Public(SubgraphDeploymentId),
-    Split(SplitTable),
+/// A cache for storage objects as constructing them takes a bit of
+/// computation. The cache lives as an attribute on the Store, but is managed
+/// solely from this module
+pub(crate) type StorageCache = Mutex<HashMap<SubgraphDeploymentId, Arc<Storage>>>;
+
+pub(crate) fn make_storage_cache() -> StorageCache {
+    Mutex::new(HashMap::new())
 }
 
 /// A connection into the database to handle entities which caches the
@@ -308,54 +283,55 @@ pub(crate) enum Table {
 /// cached across transactions as we do not track possible changes to
 /// entity storage, such as migrating a subgraph from the monolithic
 /// entities table to a split entities table
-pub(crate) struct Connection<'a> {
-    pub conn: &'a PgConnection,
-    tables: RefCell<HashMap<SubgraphDeploymentId, Table>>,
+pub(crate) struct Connection {
+    pub(crate) conn: PooledConnection<ConnectionManager<PgConnection>>,
+    /// The storage of the subgraph we are dealing with; entities
+    /// go into this
+    storage: Arc<Storage>,
 }
 
-impl<'a> Connection<'a> {
-    pub(crate) fn new(conn: &'a PgConnection) -> Connection<'a> {
+impl Connection {
+    pub(crate) fn new(conn: PooledConnection<ConnectionManager<PgConnection>>, storage: Arc<Storage>) -> Connection {
         Connection {
             conn,
-            tables: RefCell::new(HashMap::new()),
-        }
-    }
-
-    /// Return a table for the subgraph
-    fn table(&self, subgraph: &SubgraphDeploymentId) -> Result<Table, StoreError> {
-        let mut tables = self.tables.borrow_mut();
-
-        match tables.get(subgraph) {
-            Some(table) => Ok(table.clone()),
-            None => {
-                let table = Table::new(self.conn, subgraph)?;
-                tables.insert(subgraph.clone(), table.clone());
-                Ok(table)
-            }
+            storage,
         }
     }
 
     pub(crate) fn find(
         &self,
-        subgraph: &SubgraphDeploymentId,
         entity: &String,
         id: &String,
-    ) -> Result<Option<serde_json::Value>, StoreError> {
-        let table = self.table(subgraph)?;
-        table.find(self.conn, entity, id)
+        block: BlockNumber,
+    ) -> Result<Option<Entity>, StoreError> {
+        match &*self.storage {
+            Storage::Json(json) => json.find(&self.conn, entity, id),
+            Storage::Relational(layout) => layout.find(&self.conn, entity, id, block),
+        }
     }
 
     pub(crate) fn query(
         &self,
-        subgraph: &SubgraphDeploymentId,
         entity_types: Vec<String>,
         filter: Option<EntityFilter>,
-        order: Option<(String, &str, &str)>,
+        order: Option<(String, ValueType, &str)>,
         first: Option<u32>,
         skip: u32,
-    ) -> Result<Vec<(serde_json::Value, String)>, QueryExecutionError> {
-        let table = self.table(subgraph)?;
-        table.query(self.conn, entity_types, filter, order, first, skip)
+        block: BlockNumber,
+    ) -> Result<Vec<Entity>, QueryExecutionError> {
+        match &*self.storage {
+            Storage::Json(json) => json.query(&self.conn, entity_types, filter, order, first, skip),
+            Storage::Relational(layout) => {
+                layout.query(&self.conn, entity_types, filter, order, first, skip, block)
+            }
+        }
+    }
+
+    pub(crate) fn uses_relational_schema(&self) -> bool {
+        match &*self.storage {
+            Storage::Json(_) => false,
+            Storage::Relational(_) => true,
+        }
     }
 }
 
@@ -369,6 +345,208 @@ fn find_schema(
         .filter(deployment_schemas::subgraph.eq(subgraph.to_string()))
         .first::<Schema>(conn)
         .optional()?)
+}
+
+fn entity_from_json(json: serde_json::Value, entity: &str) -> Result<Entity, StoreError> {
+    let mut value = serde_json::from_value::<Entity>(json)?;
+    value.set("__typename", entity);
+    Ok(value)
+}
+
+impl JsonStorage {
+    fn find(
+        &self,
+        conn: &PgConnection,
+        entity: &str,
+        id: &String,
+    ) -> Result<Option<Entity>, StoreError> {
+        let entities = self.clone();
+        entities
+            .table
+            .filter(entities.entity.eq(entity).and(entities.id.eq(id)))
+            .select(entities.data)
+            .first::<serde_json::Value>(conn)
+            .optional()?
+            .map(|json| entity_from_json(json, entity))
+            .transpose()
+    }
+
+    /// order is a tuple (attribute, value_type, direction)
+    fn query(
+        &self,
+        conn: &PgConnection,
+        entity_types: Vec<String>,
+        filter: Option<EntityFilter>,
+        order: Option<(String, ValueType, &str)>,
+        first: Option<u32>,
+        skip: u32,
+    ) -> Result<Vec<Entity>, QueryExecutionError> {
+        let entities = self.clone();
+        let mut query = if entity_types.len() == 1 {
+            // If there is only one entity_type, which is the case in all
+            // queries that do not involve interfaces, leaving out `any`
+            // lets Postgres use the primary key index on the entities table
+            let entity_type = entity_types.first().unwrap();
+            entities
+                .table
+                .select((&self.data, &self.entity))
+                .filter((&self.entity).eq(entity_type))
+                .into_boxed::<Pg>()
+        } else {
+            entities
+                .table
+                .select((&self.data, &self.entity))
+                .filter((&self.entity).eq(any(entity_types)))
+                .into_boxed::<Pg>()
+        };
+
+        if let Some(filter) = filter {
+            let filter = build_filter(filter).map_err(|e| {
+                QueryExecutionError::FilterNotSupportedError(format!("{}", e.value), e.filter)
+            })?;
+            query = query.filter(filter);
+        }
+
+        if let Some((attribute, value_type, direction)) = order {
+            let cast = match value_type {
+                ValueType::BigInt | ValueType::BigDecimal => "::numeric",
+                ValueType::Boolean => "::boolean",
+                ValueType::Bytes => "",
+                ValueType::ID => "",
+                ValueType::Int => "::bigint",
+                ValueType::String => "",
+                ValueType::List => {
+                    return Err(QueryExecutionError::OrderByNotSupportedForType(
+                        "List".to_string(),
+                    ));
+                }
+            };
+
+            query = match value_type {
+                ValueType::String => query.order(
+                    sql::<Text>("left(data ->")
+                        .bind::<Text, _>(attribute)
+                        .sql("->> 'data', ")
+                        .sql(&STRING_PREFIX_SIZE.to_string())
+                        .sql(") ")
+                        .sql(direction)
+                        .sql(" NULLS LAST"),
+                ),
+                _ => query.order(
+                    sql::<Text>("(data ->")
+                        .bind::<Text, _>(attribute)
+                        .sql("->> 'data')")
+                        .sql(cast)
+                        .sql(" ")
+                        .sql(direction)
+                        .sql(" NULLS LAST"),
+                ),
+            };
+        }
+        query = query.then_order_by(entities.id.asc());
+
+        if let Some(first) = first {
+            query = query.limit(first as i64);
+        }
+        if skip > 0 {
+            query = query.offset(skip as i64);
+        }
+
+        let query_debug_info = debug_query(&query).to_string();
+
+        let values = query
+            .load::<(serde_json::Value, String)>(conn)
+            .map_err(|e| {
+                QueryExecutionError::ResolveEntitiesError(format!(
+                    "{}, query = {:?}",
+                    e, query_debug_info
+                ))
+            })?;
+        values
+            .into_iter()
+            .map(|(value, entity_type)| {
+                entity_from_json(value, &entity_type).map_err(QueryExecutionError::from)
+            })
+            .collect()
+    }
+}
+
+impl Storage {
+    /// The version for newly created subgraph schemas. Changing this most
+    /// likely also requires changing `create_schema`
+    #[allow(dead_code)]
+    const DEFAULT_VERSION: public::DeploymentSchemaVersion = public::DeploymentSchemaVersion::Split;
+
+    /// Look up the schema for `subgraph` and return its entity storage.
+    /// Returns an error if `subgraph` does not have an entry in
+    /// `deployment_schemas`, which can only happen if `create_schema` was not
+    /// called for that `subgraph`
+    pub(crate) fn new(
+        conn: &PgConnection,
+        subgraph: &SubgraphDeploymentId,
+        store: &Store,
+    ) -> Result<Self, StoreError> {
+        use public::DeploymentSchemaVersion as V;
+
+        let schema = find_schema(conn, subgraph)?
+            .ok_or_else(|| StoreError::Unknown(format_err!("unknown subgraph {}", subgraph)))?;
+        let storage = match schema.version {
+            V::Split => {
+                let table =
+                    diesel_dynamic_schema::schema(schema.name.clone()).table("entities".to_owned());
+                let id = table.column::<Text, _>("id".to_string());
+                let entity = table.column::<Text, _>("entity".to_string());
+                let data = table.column::<Jsonb, _>("data".to_string());
+                let event_source = table.column::<Text, _>("event_source".to_string());
+                let count_query = format!("select count(*) from \"{}\".entities", schema.name);
+
+                Storage::Json(JsonStorage {
+                    schema: schema.name,
+                    subgraph: subgraph.clone(),
+                    table,
+                    id,
+                    entity,
+                    data,
+                    event_source,
+                    count_query,
+                })
+            }
+            V::Relational => {
+                let subgraph_schema = store.input_schema(subgraph)?;
+                let layout = Layout::new(
+                    &subgraph_schema.document,
+                    IdType::String,
+                    subgraph.clone(),
+                    schema.name,
+                )?;
+                Storage::Relational(layout)
+            }
+        };
+        Ok(storage)
+    }
+
+    /// Return `true`
+    pub(crate) fn is_cacheable(&self) -> bool {
+        true
+    }
+}
+
+/* <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+/// A table representing a split entities table, i.e. a setup where
+/// a subgraph deployment's entities are split into their own schema rather
+/// than residing in the entities table in the `public` database schema
+#[derive(Debug, Clone)]
+pub(crate) struct SplitTable {
+    /// The name of the database schema
+    schema: String,
+    /// The subgraph id
+    subgraph: SubgraphDeploymentId,
+    table: DynamicTable<String>,
+    id: EntityColumn<diesel::sql_types::Text>,
+    entity: EntityColumn<diesel::sql_types::Text>,
+    data: EntityColumn<diesel::sql_types::Jsonb>,
+    event_source: EntityColumn<diesel::sql_types::Text>,
 }
 
 impl SplitTable {
@@ -389,6 +567,15 @@ impl SplitTable {
             event_source,
         }
     }
+}
+
+/// Represents a subgraph, and how it is stored in the database. The
+/// implementation of this enum masks which scheme is used to the rest of
+/// the code.
+#[derive(Clone, Debug)]
+pub(crate) enum Table {
+    Public(SubgraphDeploymentId),
+    Split(SplitTable),
 }
 
 impl Table {
@@ -547,3 +734,4 @@ impl Table {
         }
     }
 }
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< */
