@@ -6,27 +6,22 @@
 //!
 //! The pivotal struct in this module is the `Layout` which handles all the
 //! information about mapping a GraphQL schema to database tables
-
-#![allow(unused_imports)]
-
-use diesel::connection::SimpleConnection;
 use diesel::{debug_query, OptionalExtension, PgConnection, RunQueryDsl};
 use graph_graphql::graphql_parser::query as q;
 use graph_graphql::graphql_parser::schema as s;
 use inflector::Inflector;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::{self, Write};
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::relational_queries::{EntityData, FilterQuery, FindQuery, QueryFilter};
 use graph::prelude::{
-    format_err, Entity, EntityChange, EntityChangeOperation, EntityFilter, EntityKey,
-    QueryExecutionError, StoreError, StoreEvent, SubgraphDeploymentId, ValueType,
+    format_err, Entity, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
+    ValueType,
 };
 
-use crate::block_range::{BlockNumber, BLOCK_RANGE_COLUMN};
-use crate::entities::STRING_PREFIX_SIZE;
+use crate::block_range::BlockNumber;
 
 /// A string we use as a SQL name for a table or column. The important thing
 /// is that SQL names are snake cased. Using this type makes it easier to

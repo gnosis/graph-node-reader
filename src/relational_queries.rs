@@ -5,26 +5,19 @@
 //!
 //! Code in this module works very hard to minimize the number of allocations
 //! that it performs
-
-#![allow(unused_imports)]
-
 use diesel::pg::{Pg, PgConnection};
 use diesel::query_builder::{AstPass, QueryFragment, QueryId};
 use diesel::query_dsl::{LoadQuery, RunQueryDsl};
 use diesel::result::QueryResult;
-use diesel::sql_types::{Array, Binary, Bool, Integer, Jsonb, Numeric, Range, Text};
+use diesel::sql_types::{Array, Binary, Bool, Integer, Jsonb, Numeric, Text};
 use diesel::Connection;
 use std::convert::TryFrom;
 use std::str::FromStr;
 
 use graph::data::store::scalar;
-use graph::prelude::{
-    format_err, serde_json, Attribute, Entity, EntityFilter, EntityKey, StoreError, Value,
-};
+use graph::prelude::{format_err, serde_json, Attribute, Entity, EntityFilter, StoreError, Value};
 
-use crate::block_range::{
-    BlockNumber, BlockRange, BlockRangeContainsClause, BLOCK_RANGE_COLUMN,
-};
+use crate::block_range::{BlockNumber, BlockRangeContainsClause};
 use crate::entities::STRING_PREFIX_SIZE;
 use crate::filter::UnsupportedFilter;
 use crate::relational::{Column, ColumnType, Layout, SqlName, Table, PRIMARY_KEY_COLUMN};
@@ -257,14 +250,8 @@ struct PrefixComparison<'a> {
 }
 
 impl<'a> PrefixComparison<'a> {
-    fn new(
-        op: Comparison,
-        column: &'a Column,
-        text: &'a Value,
-    ) -> Self {
-        PrefixComparison {
-            op, column, text,
-        }
+    fn new(op: Comparison, column: &'a Column, text: &'a Value) -> Self {
+        PrefixComparison { op, column, text }
     }
 
     fn push_column_prefix(column: &Column, mut out: AstPass<Pg>) -> QueryResult<()> {
