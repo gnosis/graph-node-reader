@@ -140,7 +140,8 @@ impl Store {
     fn get_entity_conn(&self, subgraph: &SubgraphDeploymentId) -> Result<e::Connection, Error> {
         let conn = self.get_conn()?;
         let storage = self.storage(&conn, subgraph)?;
-        Ok(e::Connection::new(conn, storage))
+        let metadata = self.storage(&conn, &*SUBGRAPHS_ID)?;
+        Ok(e::Connection::new(conn, storage, metadata))
     }
 
     /// Return the storage for the subgraph. Since constructing a `Storage`
