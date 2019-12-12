@@ -8,6 +8,7 @@ mod block_range;
 mod entities;
 mod filter;
 mod relational;
+mod relational_queries;
 mod sql_value;
 
 pub mod store;

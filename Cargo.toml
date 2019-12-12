@@ -11,4 +11,5 @@ diesel-dynamic-schema = { git = "https://github.com/diesel-rs/diesel-dynamic-sch
 diesel-derive-enum = { version = "0.4", features = ["postgres"] }
 graph = { git = "https://github.com/graphprotocol/graph-node", tag = "v0.16.1" }
 graph-graphql = { git = "https://github.com/graphprotocol/graph-node", tag = "v0.16.1" }
+Inflector = "0.11.3"
 lru_time_cache = "0.9"
