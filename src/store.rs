@@ -176,7 +176,7 @@ impl Store {
         trace!(self.logger, "schema cache miss"; "id" => subgraph_id.to_string());
 
         let input_schema = if *subgraph_id == *SUBGRAPHS_ID {
-            unimplemented!("TODO(nlordell)")
+            include_str!("subgraphs.graphql").to_owned()
         } else {
             let manifest_entity = self
                 .get(EntityKey {
