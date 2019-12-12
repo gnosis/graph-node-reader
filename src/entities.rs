@@ -31,13 +31,14 @@ use diesel::{OptionalExtension, QueryDsl, RunQueryDsl};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use graph::prelude::{Entity,ValueType, 
-    format_err, serde_json, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
-};
 use graph::components::store::SubgraphDeploymentStore;
+use graph::prelude::{
+    format_err, serde_json, Entity, EntityFilter, QueryExecutionError, StoreError,
+    SubgraphDeploymentId, ValueType,
+};
 
 use crate::block_range::BlockNumber;
-use crate::filter::{build_filter};
+use crate::filter::build_filter;
 use crate::relational::{IdType, Layout};
 use crate::store::Store;
 
@@ -291,11 +292,11 @@ pub(crate) struct Connection {
 }
 
 impl Connection {
-    pub(crate) fn new(conn: PooledConnection<ConnectionManager<PgConnection>>, storage: Arc<Storage>) -> Connection {
-        Connection {
-            conn,
-            storage,
-        }
+    pub(crate) fn new(
+        conn: PooledConnection<ConnectionManager<PgConnection>>,
+        storage: Arc<Storage>,
+    ) -> Connection {
+        Connection { conn, storage }
     }
 
     pub(crate) fn find(

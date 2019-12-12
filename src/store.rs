@@ -95,7 +95,6 @@ impl Store {
         })
     }
 
-
     fn execute_query(
         &self,
         conn: &e::Connection,
@@ -248,19 +247,25 @@ pub trait StoreReader: Send + Sync + 'static {
 
 impl StoreReader for Store {
     fn get(&self, key: EntityKey) -> Result<Option<Entity>, QueryExecutionError> {
-        let conn = self.get_entity_conn(&key.subgraph_id).map_err(|e| QueryExecutionError::StoreError(e.into()))?;
+        let conn = self
+            .get_entity_conn(&key.subgraph_id)
+            .map_err(|e| QueryExecutionError::StoreError(e.into()))?;
         self.get_entity(&conn, &key.subgraph_id, &key.entity_type, &key.entity_id)
     }
 
     fn find(&self, query: EntityQuery) -> Result<Vec<Entity>, QueryExecutionError> {
-        let conn = self.get_entity_conn(&query.subgraph_id).map_err(|e| QueryExecutionError::StoreError(e.into()))?;
+        let conn = self
+            .get_entity_conn(&query.subgraph_id)
+            .map_err(|e| QueryExecutionError::StoreError(e.into()))?;
         self.execute_query(&conn, query)
     }
 
     fn find_one(&self, mut query: EntityQuery) -> Result<Option<Entity>, QueryExecutionError> {
         query.range = EntityRange::first(1);
 
-        let conn = self.get_entity_conn(&query.subgraph_id).map_err(|e| QueryExecutionError::StoreError(e.into()))?;
+        let conn = self
+            .get_entity_conn(&query.subgraph_id)
+            .map_err(|e| QueryExecutionError::StoreError(e.into()))?;
 
         let mut results = self.execute_query(&conn, query)?;
         match results.len() {
