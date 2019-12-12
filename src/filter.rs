@@ -1,7 +1,6 @@
 use diesel::dsl::{self, sql};
 use diesel::pg::Pg;
 use diesel::prelude::*;
-use diesel::query_builder::BoxedSelectStatement;
 use diesel::serialize::ToSql;
 use diesel::sql_types::{Array, Bool, Double, HasSqlType, Integer, Numeric, Text};
 use std::str::FromStr;
@@ -10,7 +9,7 @@ use graph::components::store::EntityFilter;
 use graph::data::store::*;
 use graph::prelude::{serde_json, BigDecimal, BigInt};
 
-use crate::entities::EntitySource;
+use crate::entities::{EntitySource, STRING_PREFIX_SIZE};
 use crate::sql_value::SqlValue;
 
 #[derive(Debug)]
@@ -27,13 +26,34 @@ trait IntoFilter<QS> {
 
 impl<QS> IntoFilter<QS> for String {
     fn into_filter(self, attribute: String, op: &str) -> FilterExpression<QS> {
-        Box::new(
-            sql("data -> ")
-                .bind::<Text, _>(attribute)
-                .sql("->> 'data'")
-                .sql(op)
-                .bind::<Text, _>(self),
-        ) as FilterExpression<QS>
+        if &attribute == "id" {
+            // Use the `id` column rather than `data->'id'->>'data'` so that
+            // Postgres can use the primary key index on the entities table
+            Box::new(sql("id").sql(op).bind::<Text, _>(self)) as FilterExpression<QS>
+        } else {
+            // Generate
+            //  (left(attribute, prefix_size) op left(self, prefix_size) and attribute op self)
+            // The first condition is there to make the index on attribute usable,
+            // the second so that we only return correct results
+            Box::new(
+                sql("(left(data -> ")
+                    .bind::<Text, _>(attribute.clone())
+                    .sql("->> 'data', ")
+                    .sql(&STRING_PREFIX_SIZE.to_string())
+                    .sql(") ")
+                    .sql(op)
+                    .sql(" left(")
+                    .bind::<Text, _>(self.clone())
+                    .sql(", ")
+                    .sql(&STRING_PREFIX_SIZE.to_string())
+                    .sql(") and data -> ")
+                    .bind::<Text, _>(attribute)
+                    .sql("->> 'data' ")
+                    .sql(op)
+                    .bind::<Text, _>(self)
+                    .sql(")"),
+            ) as FilterExpression<QS>
+        }
     }
 }
 
@@ -141,17 +161,6 @@ impl<QS> IntoArrayFilter<QS, SqlValue> for Vec<SqlValue> {
     }
 }
 
-/// Adds `filter` to a `SELECT data FROM entities` statement.
-pub(crate) fn store_filter<QS, ST>(
-    query: BoxedSelectStatement<ST, QS, Pg>,
-    filter: EntityFilter,
-) -> Result<BoxedSelectStatement<ST, QS, Pg>, UnsupportedFilter>
-where
-    QS: EntitySource + 'static,
-{
-    Ok(query.filter(build_filter(filter)?))
-}
-
 pub(crate) fn build_filter<QS>(
     filter: EntityFilter,
 ) -> Result<FilterExpression<QS>, UnsupportedFilter>
@@ -184,8 +193,14 @@ where
             };
 
             match value {
-                Value::String(s) => Ok(s.into_filter(attribute, op)),
-                Value::Bytes(b) => Ok(b.to_string().into_filter(attribute, op)),
+                Value::String(s) => {
+                    if s.starts_with('%') || s.ends_with('%') {
+                        Ok(s.into_filter(attribute, op))
+                    } else {
+                        Ok(format!("%{}%", s).into_filter(attribute, op))
+                    }
+                }
+                Value::Bytes(b) => Ok(format!("%{}%", b.to_string()).into_filter(attribute, op)),
                 Value::List(lst) => {
                     let s = serde_json::to_string(&lst).expect("failed to serialize list value");
                     let predicate = sql("data -> ")
