@@ -23,7 +23,7 @@ use graph::prelude::{
 };
 
 use crate::block_range::{
-    BlockNumber, BlockRange, BlockRangeContainsClause, BLOCK_RANGE_COLUMN, BLOCK_RANGE_CURRENT,
+    BlockNumber, BlockRange, BlockRangeContainsClause, BLOCK_RANGE_COLUMN,
 };
 use crate::entities::STRING_PREFIX_SIZE;
 use crate::filter::UnsupportedFilter;

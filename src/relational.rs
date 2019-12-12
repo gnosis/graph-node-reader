@@ -48,10 +48,6 @@ impl SqlName {
         &self.0
     }
 
-    pub fn quoted(&self) -> String {
-        format!("\"{}\"", self.0)
-    }
-
     // Check that `name` matches the regular expression `/[A-Za-z][A-Za-z0-9_]*/`
     // without pulling in a regex matcher
     fn check_valid_identifier(name: &str, kind: &str) -> Result<(), StoreError> {
@@ -121,10 +117,23 @@ type EnumMap = BTreeMap<String, Vec<String>>;
 
 #[derive(Debug, Clone)]
 pub struct Layout {
+    /// The SQL type for columns with GraphQL type `ID`
+    id_type: IdType,
     /// Maps the GraphQL name of a type to the relational table
     pub tables: HashMap<String, Arc<Table>>,
+    /// The subgraph id
+    pub subgraph: SubgraphDeploymentId,
     /// The database schema for this subgraph
     pub schema: String,
+    /// Map the entity names of interfaces to the list of
+    /// database tables that contain entities implementing
+    /// that interface
+    pub interfaces: HashMap<String, Vec<Arc<Table>>>,
+    /// Enums defined in the schema and their possible values. The names
+    /// are the original GraphQL names
+    pub enums: EnumMap,
+    /// The query to count all entities
+    pub count_query: String,
 }
 
 impl Layout {
@@ -134,16 +143,15 @@ impl Layout {
     /// the name of the database schema in which the subgraph's tables live
     /// is in `schema`.
     pub fn new<V>(
-        _: &s::Document,
-        _: IdType,
-        _: SubgraphDeploymentId,
-        _: V,
+        document: &s::Document,
+        id_type: IdType,
+        subgraph: SubgraphDeploymentId,
+        schema: V,
     ) -> Result<Layout, StoreError>
     where
         V: Into<String>,
     {
-        /*
-                use s::Definition::*;
+        use s::Definition::*;
         use s::TypeDefinition::*;
 
         let schema = schema.into();
@@ -237,9 +245,6 @@ impl Layout {
             enums,
             count_query,
         })
-        */
-
-        unimplemented!()
     }
 
     pub fn table_for_entity(&self, entity: &str) -> Result<&Arc<Table>, StoreError> {
@@ -391,18 +396,6 @@ impl ColumnType {
             ))),
         }
     }
-
-    fn sql_type(&self) -> &str {
-        match self {
-            ColumnType::Boolean => "boolean",
-            ColumnType::BigDecimal => "numeric",
-            ColumnType::BigInt => "numeric",
-            ColumnType::Bytes => "bytea",
-            ColumnType::Int => "integer",
-            ColumnType::String => "text",
-            ColumnType::Enum(name) => name.as_str(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -432,20 +425,6 @@ impl Column {
         })
     }
 
-    fn sql_type(&self) -> &str {
-        self.column_type.sql_type()
-    }
-
-    pub fn is_nullable(&self) -> bool {
-        fn is_nullable(field_type: &q::Type) -> bool {
-            match field_type {
-                q::Type::NonNullType(_) => false,
-                _ => true,
-            }
-        }
-        is_nullable(&self.field_type)
-    }
-
     pub fn is_list(&self) -> bool {
         fn is_list(field_type: &q::Type) -> bool {
             use q::Type::*;
@@ -459,36 +438,11 @@ impl Column {
         is_list(&self.field_type)
     }
 
-    pub fn is_enum(&self) -> bool {
-        if let ColumnType::Enum(_) = self.column_type {
-            true
-        } else {
-            false
-        }
-    }
-
     /// Return `true` if this column stores user-supplied text. Such
     /// columns may contain very large values and need to be handled
     /// specially for indexing
     pub fn is_text(&self) -> bool {
         named_type(&self.field_type) == "String" && !self.is_list()
-    }
-
-    /// Generate the DDL for one column, i.e. the part of a `create table`
-    /// statement for this column.
-    ///
-    /// See the unit tests at the end of this file for the actual DDL that
-    /// gets generated
-    fn as_ddl(&self, out: &mut String) -> fmt::Result {
-        write!(out, "    ")?;
-        write!(out, "{:20} {}", self.name.quoted(), self.sql_type())?;
-        if self.is_list() {
-            write!(out, "[]")?;
-        }
-        if self.name.0 == PRIMARY_KEY_COLUMN || !self.is_nullable() {
-            write!(out, " not null")?;
-        }
-        Ok(())
     }
 }
 
@@ -510,6 +464,62 @@ pub struct Table {
     position: u32,
 }
 
+impl Table {
+    fn new(
+        defn: &s::ObjectType,
+        schema: &str,
+        interfaces: &mut HashMap<String, Vec<SqlName>>,
+        enums: &EnumMap,
+        id_type: IdType,
+        position: u32,
+    ) -> Result<Table, StoreError> {
+        SqlName::check_valid_identifier(&*defn.name, "object")?;
+
+        let table_name = SqlName::from(&*defn.name);
+        let columns = defn
+            .fields
+            .iter()
+            .filter(|field| !derived_column(field))
+            .map(|field| Column::new(field, schema, enums, id_type))
+            .collect::<Result<Vec<_>, _>>()?;
+        let table = Table {
+            object: defn.name.clone(),
+            name: table_name.clone(),
+            columns,
+            position,
+        };
+        for interface_name in &defn.implements_interfaces {
+            match interfaces.get_mut(interface_name) {
+                Some(tables) => tables.push(table.name.clone()),
+                None => {
+                    return Err(StoreError::Unknown(format_err!(
+                        "unknown interface {}",
+                        interface_name
+                    )))
+                }
+            }
+        }
+        Ok(table)
+    }
+    /// Find the column `name` in this table. The name must be in snake case,
+    /// i.e., use SQL conventions
+    pub fn column(&self, name: &SqlName) -> Result<&Column, StoreError> {
+        self.columns
+            .iter()
+            .find(|column| &column.name == name)
+            .ok_or_else(|| StoreError::UnknownField(name.to_string()))
+    }
+
+    /// Find the column for `field` in this table. The name must be the
+    /// GraphQL name of an entity field
+    pub fn column_for_field(&self, field: &str) -> Result<&Column, StoreError> {
+        self.columns
+            .iter()
+            .find(|column| &column.field == field)
+            .ok_or_else(|| StoreError::UnknownField(field.to_string()))
+    }
+}
+
 /// Return the enclosed named type for a field type, i.e., the type after
 /// stripping List and NonNull.
 fn named_type(field_type: &q::Type) -> &str {
@@ -518,4 +528,11 @@ fn named_type(field_type: &q::Type) -> &str {
         q::Type::ListType(child) => named_type(child),
         q::Type::NonNullType(child) => named_type(child),
     }
+}
+
+fn derived_column(field: &s::Field) -> bool {
+    field
+        .directives
+        .iter()
+        .any(|dir| dir.name == s::Name::from("derivedFrom"))
 }
