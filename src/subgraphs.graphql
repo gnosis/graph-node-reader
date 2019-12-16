@@ -1,0 +1,131 @@
+type Subgraph @entity {
+    id: ID!
+    name: String!
+    versions: [SubgraphVersion!]! @derivedFrom(field: "subgraph")
+    currentVersion: SubgraphVersion
+    pendingVersion: SubgraphVersion
+    createdAt: BigInt!
+}
+
+type SubgraphVersion @entity {
+    id: ID!
+    subgraph: Subgraph!
+    deployment: SubgraphDeployment!
+    createdAt: BigInt!
+}
+
+type SubgraphDeployment @entity {
+    id: ID! # Subgraph IPFS hash
+    manifest: SubgraphManifest!
+    failed: Boolean!
+    synced: Boolean!
+    earliestEthereumBlockHash: Bytes
+    earliestEthereumBlockNumber: BigInt
+    latestEthereumBlockHash: Bytes
+    latestEthereumBlockNumber: BigInt
+    ethereumHeadBlockNumber: BigInt
+    ethereumHeadBlockHash: Bytes
+    totalEthereumBlocksCount: BigInt!
+    entityCount: BigInt!
+    dynamicDataSources: [DynamicEthereumContractDataSource!] @derivedFrom(field: "deployment")
+}
+
+type SubgraphDeploymentAssignment @entity {
+    id: ID! # Subgraph IPFS hash
+    nodeId: String!
+    cost: BigInt!
+}
+
+type SubgraphManifest @entity {
+    id: ID!
+    specVersion: String!
+    description: String
+    repository: String
+    schema: String!
+    dataSources: [EthereumContractDataSource!]!
+    templates: [EthereumContractDataSourceTemplate!]
+}
+
+type EthereumContractDataSource @entity {
+    id: ID!
+    kind: String!
+    name: String!
+    network: String
+    source: EthereumContractSource!
+    mapping: EthereumContractMapping!
+    templates: [EthereumContractDataSourceTemplate!]
+}
+
+type DynamicEthereumContractDataSource @entity {
+    id: ID!
+    kind: String!
+    name: String!
+    network: String
+    source: EthereumContractSource!
+    mapping: EthereumContractMapping!
+    templates: [EthereumContractDataSourceTemplate!]
+    ethereumBlockHash: Bytes!
+    ethereumBlockNumber: BigInt!
+    deployment: SubgraphDeployment!
+}
+
+type EthereumContractSource @entity {
+    id: ID!
+    address: String!
+    abi: String!
+    startBlock: BigInt
+}
+
+type EthereumContractMapping @entity {
+    id: ID!
+    kind: String!
+    apiVersion: String!
+    language: String!
+    file: String!
+    entities: [String!]!
+    abis: [EthereumContractAbi!]!
+    blockHandlers: [EthereumBlockHandlerEntity!]
+    callHandlers: [EthereumCallHandlerEntity!]
+    eventHandlers: [EthereumContractEventHandler!]
+}
+
+type EthereumContractAbi @entity {
+    id: ID!
+    name: String!
+    file: String!
+}
+
+type EthereumBlockHandlerEntity @entity {
+    handler: String!
+    filter: EthereumBlockHandlerFilterEntity
+}
+
+type EthereumBlockHandlerFilterEntity @entity {
+     kind: String!
+}
+
+type EthereumCallHandlerEntity @entity {
+    function: String!
+    handler: String!
+}
+
+type EthereumContractEventHandler @entity {
+    id: ID!
+    event: String!
+    topic0: Bytes
+    handler: String!
+}
+
+type EthereumContractDataSourceTemplate @entity {
+    id: ID!
+    kind: String!
+    name: String!
+    network: String
+    source: EthereumContractDataSourceTemplateSource!
+    mapping: EthereumContractMapping!
+}
+
+type EthereumContractDataSourceTemplateSource @entity {
+    id: ID!
+    abi: String!
+}
