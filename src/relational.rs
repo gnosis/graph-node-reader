@@ -17,11 +17,9 @@ use std::sync::Arc;
 
 use crate::relational_queries::{EntityData, FilterQuery, FindQuery, QueryFilter};
 use graph::prelude::{
-    format_err, Entity, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
+    format_err, BlockNumber, Entity, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
     ValueType,
 };
-
-use crate::block_range::BlockNumber;
 
 /// A string we use as a SQL name for a table or column. The important thing
 /// is that SQL names are snake cased. Using this type makes it easier to
@@ -35,12 +33,16 @@ use crate::block_range::BlockNumber;
 /// Postgres, we would create the same table twice. We consider this case
 /// to be pathological and so unlikely in practice that we do not try to work
 /// around it in the application.
-#[derive(Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub struct SqlName(String);
 
 impl SqlName {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn quoted(&self) -> String {
+        format!("\"{}\"", self.0)
     }
 
     // Check that `name` matches the regular expression `/[A-Za-z][A-Za-z0-9_]*/`
@@ -78,6 +80,10 @@ impl SqlName {
 
     pub fn from_snake_case(s: String) -> Self {
         SqlName(s)
+    }
+
+    pub fn qualified_name(schema: &str, name: &SqlName) -> Self {
+        SqlName(format!("\"{}\".\"{}\"", schema, name.as_str()))
     }
 }
 
@@ -256,7 +262,7 @@ impl Layout {
         block: BlockNumber,
     ) -> Result<Option<Entity>, StoreError> {
         let table = self.table_for_entity(entity)?;
-        FindQuery::new(&self.schema, table.as_ref(), id, block)
+        FindQuery::new(table.as_ref(), id, block)
             .get_result::<EntityData>(conn)
             .optional()?
             .map(|entity_data| entity_data.to_entity(self))
@@ -267,50 +273,13 @@ impl Layout {
     pub fn query(
         &self,
         conn: &PgConnection,
-        entity_types: Vec<String>,
+        collection: EntityCollection,
         filter: Option<EntityFilter>,
-        order: Option<(String, ValueType, &str)>,
-        first: Option<u32>,
-        skip: u32,
+        order: Option<(String, ValueType, EntityOrder)>,
+        range: EntityRange,
         block: BlockNumber,
     ) -> Result<Vec<Entity>, QueryExecutionError> {
-        let filter = filter.as_ref();
-        let table_filter_pairs = entity_types
-            .into_iter()
-            .map(|entity| {
-                self.table_for_entity(&entity)
-                    .map(|rc| rc.as_ref())
-                    .and_then(|table| {
-                        filter
-                            .map(|filter| QueryFilter::new(filter, table))
-                            .transpose()
-                            .map(|filter| (table, filter))
-                    })
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        let first = first.map(|first| first.to_string());
-        let skip = if skip == 0 {
-            None
-        } else {
-            Some(skip.to_string())
-        };
-
-        // Get the name of the column we order by; if there is more than one
-        // table, we are querying an interface, and the order is on an attribute
-        // in that interface so that all tables have a column for that. It is
-        // therefore enough to just look at the first table to get the name
-        let order = match (order, table_filter_pairs.first()) {
-            (_, None) => {
-                unreachable!("an entity query always contains at least one entity type/table");
-            }
-            (Some((ref attribute, _, direction)), Some((table, _))) => {
-                let column = table.column_for_field(&attribute)?;
-                Some((&column.name, direction))
-            }
-            (None, _) => None,
-        };
-
-        let query = FilterQuery::new(&self.schema, table_filter_pairs, order, first, skip, block);
+        let query = FilterQuery::new(&self, collection, filter.as_ref(), order, range, block)?;
         let query_debug_info = query.clone();
 
         let values = query.load::<EntityData>(conn).map_err(|e| {
@@ -353,6 +322,7 @@ impl From<IdType> for ColumnType {
     }
 }
 
+
 impl ColumnType {
     fn from_field_type(
         field_type: &q::Type,
@@ -367,11 +337,10 @@ impl ColumnType {
         if enums.contains_key(&*name) {
             // We do things this convoluted way to make sure field_type gets
             // snakecased, but the `.` must stay a `.`
-            return Ok(ColumnType::Enum(SqlName(format!(
-                "\"{}\".\"{}\"",
+            return Ok(ColumnType::Enum(SqlName::qualified_name(
                 schema,
-                SqlName::from(name)
-            ))));
+                &SqlName::from(name),
+            )));
         }
 
         // It is not an enum, and therefore one of our builtin primitive types
@@ -389,6 +358,18 @@ impl ColumnType {
             ValueType::List => Err(StoreError::Unknown(format_err!(
                 "can not convert ValueType::List to ColumnType"
             ))),
+        }
+    }
+
+    fn sql_type(&self) -> &str {
+        match self {
+            ColumnType::Boolean => "boolean",
+            ColumnType::BigDecimal => "numeric",
+            ColumnType::BigInt => "numeric",
+            ColumnType::Bytes => "bytea",
+            ColumnType::Int => "integer",
+            ColumnType::String => "text",
+            ColumnType::Enum(name) => name.as_str(),
         }
     }
 }
@@ -420,6 +401,20 @@ impl Column {
         })
     }
 
+    fn sql_type(&self) -> &str {
+        self.column_type.sql_type()
+    }
+
+    pub fn is_nullable(&self) -> bool {
+        fn is_nullable(field_type: &q::Type) -> bool {
+            match field_type {
+                q::Type::NonNullType(_) => false,
+                _ => true,
+            }
+        }
+        is_nullable(&self.field_type)
+    }
+
     pub fn is_list(&self) -> bool {
         fn is_list(field_type: &q::Type) -> bool {
             use q::Type::*;
@@ -433,6 +428,14 @@ impl Column {
         is_list(&self.field_type)
     }
 
+    pub fn is_enum(&self) -> bool {
+        if let ColumnType::Enum(_) = self.column_type {
+            true
+        } else {
+            false
+        }
+    }
+
     /// Return `true` if this column stores user-supplied text. Such
     /// columns may contain very large values and need to be handled
     /// specially for indexing
@@ -444,6 +447,10 @@ impl Column {
 /// The name for the primary key column of a table; hardcoded for now
 pub(crate) const PRIMARY_KEY_COLUMN: &str = "id";
 
+/// We give every version of every entity in our tables, i.e., every row, a
+/// synthetic primary key. This is the name of the column we use.
+pub(crate) const VID_COLUMN: &str = "vid";
+
 #[derive(Clone, Debug)]
 pub struct Table {
     /// The name of the GraphQL object type ('Thing')
@@ -451,6 +458,10 @@ pub struct Table {
     /// The name of the database table for this type ('thing'), snakecased
     /// version of `object`
     pub name: SqlName,
+
+    /// The table name qualified with the schema in which the table lives,
+    /// `schema.table`
+    pub qualified_name: SqlName,
 
     pub columns: Vec<Column>,
     /// The position of this table in all the tables for this layout; this
@@ -480,6 +491,7 @@ impl Table {
         let table = Table {
             object: defn.name.clone(),
             name: table_name.clone(),
+            qualified_name: SqlName::qualified_name(schema, &table_name),
             columns,
             position,
         };
