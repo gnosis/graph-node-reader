@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use crate::relational_queries::{EntityData, FilterQuery, FindQuery, QueryFilter};
 use graph::prelude::{
-    format_err, BlockNumber, Entity, EntityFilter, QueryExecutionError, StoreError,
+    format_err, BlockNumber, Entity, EntityChange, EntityChangeOperation, EntityCollection,
+    EntityFilter, EntityKey, EntityOrder, EntityRange, QueryExecutionError, StoreError, StoreEvent,
     SubgraphDeploymentId, ValueType,
 };
 

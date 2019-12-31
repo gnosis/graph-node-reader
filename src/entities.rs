@@ -32,12 +32,13 @@ use std::sync::{Arc, Mutex};
 
 use graph::components::store::SubgraphDeploymentStore;
 use graph::prelude::{
-    format_err, serde_json, Entity, EntityFilter, QueryExecutionError, StoreError,
-    SubgraphDeploymentId, ValueType,
+    format_err, serde_json, Attribute, BlockNumber, Entity, EntityCollection, EntityFilter,
+    EntityKey, EntityLink, EntityOrder, EntityRange, EntityWindow, QueryExecutionError, StoreError,
+    Value, ValueType, SubgraphDeploymentId, BLOCK_NUMBER_MAX,
 };
 
-use crate::block_range::BlockNumber;
 use crate::filter::build_filter;
+use crate::jsonb_queries::FilterQuery;
 use crate::relational::{IdType, Layout};
 use crate::store::Store;
 

@@ -11,12 +11,15 @@ use diesel::query_dsl::{LoadQuery, RunQueryDsl};
 use diesel::result::QueryResult;
 use diesel::sql_types::{Array, Binary, Bool, Integer, Jsonb, Numeric, Text};
 use diesel::Connection;
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::str::FromStr;
 
 use graph::data::store::scalar;
 use graph::prelude::{
-    format_err, serde_json, Attribute, BlockNumber, Entity, EntityFilter, StoreError, Value,
+    format_err, serde_json, Attribute, BlockNumber, Entity, EntityCollection, EntityFilter,
+    EntityKey, EntityLink, EntityOrder, EntityRange, EntityWindow, QueryExecutionError, StoreError,
+    Value, ValueType,
 };
 
 use crate::block_range::BlockRangeContainsClause;
@@ -744,6 +747,48 @@ impl<'a> QueryFragment<Pg> for QueryFilter<'a> {
         Ok(())
     }
 }
+
+#[derive(Debug, Clone, Constructor)]
+pub struct FindQuery<'a> {
+    table: &'a Table,
+    id: &'a str,
+    block: BlockNumber,
+}
+
+impl<'a> QueryFragment<Pg> for FindQuery<'a> {
+    fn walk_ast(&self, mut out: AstPass<Pg>) -> QueryResult<()> {
+        out.unsafe_to_cache_prepared();
+
+        // Generate
+        //    select '..' as entity, to_jsonb(e.*) as data
+        //      from schema.table e where id = $1
+        out.push_sql("select ");
+        out.push_bind_param::<Text, _>(&self.table.object)?;
+        out.push_sql(" as entity, to_jsonb(e.*) as data\n");
+        out.push_sql("  from ");
+        out.push_sql(self.table.qualified_name.as_str());
+        out.push_sql(" e\n where ");
+        out.push_identifier(PRIMARY_KEY_COLUMN)?;
+        out.push_sql(" = ");
+        out.push_bind_param::<Text, _>(&self.id)?;
+        out.push_sql(" and ");
+        BlockRangeContainsClause::new("e.", self.block).walk_ast(out)
+    }
+}
+
+impl<'a> QueryId for FindQuery<'a> {
+    type QueryId = ();
+
+    const HAS_STATIC_QUERY_ID: bool = false;
+}
+
+impl<'a> LoadQuery<PgConnection, EntityData> for FindQuery<'a> {
+    fn internal_load(self, conn: &PgConnection) -> QueryResult<Vec<EntityData>> {
+        conn.query_by_name(&self)
+    }
+}
+
+impl<'a, Conn> RunQueryDsl<Conn> for FindQuery<'a> {}
 
 /// A `ParentLink` where we've resolved the entity type and attribute to the
 /// corresponding table and column

@@ -9,7 +9,6 @@ use graph::prelude::*;
 use graph::util::security::SafeDisplay;
 use graph_graphql::prelude::api_schema;
 
-use crate::block_range::BLOCK_NUMBER_MAX;
 use crate::entities as e;
 
 #[derive(Clone)]
