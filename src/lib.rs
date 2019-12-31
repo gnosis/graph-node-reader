@@ -1,4 +1,6 @@
 #[macro_use]
+extern crate derive_more;
+#[macro_use]
 extern crate diesel;
 extern crate diesel_dynamic_schema;
 #[macro_use]
