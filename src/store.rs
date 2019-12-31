@@ -25,6 +25,7 @@ pub struct Store {
     logger: Logger,
     conn: Pool<ConnectionManager<PgConnection>>,
     schema_cache: Mutex<LruCache<SubgraphDeploymentId, SchemaPair>>,
+
     /// A cache for the storage metadata for subgraphs. The Store just
     /// hosts this because it lives long enough, but it is managed from
     /// the entities module
@@ -103,13 +104,7 @@ impl Store {
         // Add order by filters to query
         let order = match query.order_by {
             Some((attribute, value_type)) => {
-                let direction = query
-                    .order_direction
-                    .map(|direction| match direction {
-                        EntityOrder::Ascending => "ASC",
-                        EntityOrder::Descending => "DESC",
-                    })
-                    .unwrap_or("ASC");
+                let direction = query.order_direction.unwrap_or(EntityOrder::Ascending);
                 Some((attribute, value_type, direction))
             }
             None => None,
@@ -117,12 +112,11 @@ impl Store {
 
         // Process results; deserialize JSON data
         conn.query(
-            query.entity_types,
+            query.collection,
             query.filter,
             order,
-            query.range.first,
-            query.range.skip,
-            BLOCK_NUMBER_MAX,
+            query.range,
+            query.block,
         )
     }
 
@@ -176,6 +170,7 @@ impl Store {
         trace!(self.logger, "schema cache miss"; "id" => subgraph_id.to_string());
 
         let input_schema = if *subgraph_id == *SUBGRAPHS_ID {
+            // The subgraph of subgraphs schema is built-in.
             include_str!("subgraphs.graphql").to_owned()
         } else {
             let manifest_entity = self
