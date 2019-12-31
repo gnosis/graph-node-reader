@@ -6,8 +6,6 @@ use diesel::sql_types::Integer;
 
 use graph::prelude::BlockNumber;
 
-pub const BLOCK_NUMBER_MAX: BlockNumber = std::i32::MAX;
-
 /// The name of the column in which we store the block range
 pub(crate) const BLOCK_RANGE_COLUMN: &str = "block_range";
 
