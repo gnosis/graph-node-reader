@@ -15,14 +15,15 @@ use std::convert::TryFrom;
 use std::str::FromStr;
 
 use graph::data::store::scalar;
-use graph::prelude::{format_err, serde_json, Attribute, BlockNumber, Entity, EntityFilter, StoreError, Value};
+use graph::prelude::{
+    format_err, serde_json, Attribute, BlockNumber, Entity, EntityFilter, StoreError, Value,
+};
 
 use crate::block_range::BlockRangeContainsClause;
 use crate::entities::STRING_PREFIX_SIZE;
 use crate::filter::UnsupportedFilter;
 use crate::relational::{Column, ColumnType, Layout, SqlName, Table, PRIMARY_KEY_COLUMN};
 use crate::sql_value::SqlValue;
-
 
 /// Helper struct for retrieving entities from the database. With diesel, we
 /// can only run queries that return columns whose number and type are known
