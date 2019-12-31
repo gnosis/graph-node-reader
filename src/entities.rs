@@ -20,7 +20,7 @@
 // for dynamic tables.
 
 use diesel::debug_query;
-use diesel::pg::{PgConnection};
+use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
 use diesel::sql_types::{Jsonb, Text};
 use diesel::BoolExpressionMethods;
@@ -31,9 +31,9 @@ use std::sync::{Arc, Mutex};
 
 use graph::components::store::SubgraphDeploymentStore;
 use graph::prelude::{
-    format_err, serde_json, BlockNumber, Entity, EntityCollection, EntityFilter,
-    EntityOrder, EntityRange, QueryExecutionError, StoreError,
-    ValueType, SubgraphDeploymentId, BLOCK_NUMBER_MAX,
+    format_err, serde_json, BlockNumber, Entity, EntityCollection, EntityFilter, EntityOrder,
+    EntityRange, QueryExecutionError, StoreError, SubgraphDeploymentId, ValueType,
+    BLOCK_NUMBER_MAX,
 };
 
 use crate::jsonb_queries::FilterQuery;

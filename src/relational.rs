@@ -17,9 +17,8 @@ use std::sync::Arc;
 
 use crate::relational_queries::{EntityData, FilterQuery, FindQuery};
 use graph::prelude::{
-    format_err, BlockNumber, Entity, EntityCollection,
-    EntityFilter, EntityOrder, EntityRange, QueryExecutionError, StoreEvent,
-    SubgraphDeploymentId, ValueType,
+    format_err, BlockNumber, Entity, EntityCollection, EntityFilter, EntityOrder, EntityRange,
+    QueryExecutionError, StoreError, SubgraphDeploymentId, ValueType,
 };
 
 /// A string we use as a SQL name for a table or column. The important thing
@@ -356,18 +355,6 @@ impl ColumnType {
             ))),
         }
     }
-
-    fn sql_type(&self) -> &str {
-        match self {
-            ColumnType::Boolean => "boolean",
-            ColumnType::BigDecimal => "numeric",
-            ColumnType::BigInt => "numeric",
-            ColumnType::Bytes => "bytea",
-            ColumnType::Int => "integer",
-            ColumnType::String => "text",
-            ColumnType::Enum(name) => name.as_str(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -397,20 +384,6 @@ impl Column {
         })
     }
 
-    fn sql_type(&self) -> &str {
-        self.column_type.sql_type()
-    }
-
-    pub fn is_nullable(&self) -> bool {
-        fn is_nullable(field_type: &q::Type) -> bool {
-            match field_type {
-                q::Type::NonNullType(_) => false,
-                _ => true,
-            }
-        }
-        is_nullable(&self.field_type)
-    }
-
     pub fn is_list(&self) -> bool {
         fn is_list(field_type: &q::Type) -> bool {
             use q::Type::*;
@@ -424,14 +397,6 @@ impl Column {
         is_list(&self.field_type)
     }
 
-    pub fn is_enum(&self) -> bool {
-        if let ColumnType::Enum(_) = self.column_type {
-            true
-        } else {
-            false
-        }
-    }
-
     /// Return `true` if this column stores user-supplied text. Such
     /// columns may contain very large values and need to be handled
     /// specially for indexing
@@ -442,10 +407,6 @@ impl Column {
 
 /// The name for the primary key column of a table; hardcoded for now
 pub(crate) const PRIMARY_KEY_COLUMN: &str = "id";
-
-/// We give every version of every entity in our tables, i.e., every row, a
-/// synthetic primary key. This is the name of the column we use.
-pub(crate) const VID_COLUMN: &str = "vid";
 
 #[derive(Clone, Debug)]
 pub struct Table {

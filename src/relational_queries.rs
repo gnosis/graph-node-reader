@@ -18,8 +18,8 @@ use std::str::FromStr;
 use graph::data::store::scalar;
 use graph::prelude::{
     format_err, serde_json, Attribute, BlockNumber, Entity, EntityCollection, EntityFilter,
-    EntityLink, EntityOrder, EntityRange, EntityWindow, QueryExecutionError, StoreError,
-    Value, ValueType,
+    EntityLink, EntityOrder, EntityRange, EntityWindow, QueryExecutionError, StoreError, Value,
+    ValueType,
 };
 
 use crate::block_range::BlockRangeContainsClause;
@@ -117,10 +117,6 @@ impl EntityData {
                 unimplemented!("objects as entity attributes are not needed/supported")
             }
         }
-    }
-
-    pub fn entity_type(&self) -> String {
-        self.entity.clone()
     }
 
     /// Map the `EntityData` to an entity using the schema information
