@@ -15,13 +15,14 @@ use std::convert::TryFrom;
 use std::str::FromStr;
 
 use graph::data::store::scalar;
-use graph::prelude::{format_err, serde_json, Attribute, Entity, EntityFilter, StoreError, Value};
+use graph::prelude::{format_err, serde_json, Attribute, BlockNumber, Entity, EntityFilter, StoreError, Value};
 
-use crate::block_range::{BlockNumber, BlockRangeContainsClause};
+use crate::block_range::BlockRangeContainsClause;
 use crate::entities::STRING_PREFIX_SIZE;
 use crate::filter::UnsupportedFilter;
 use crate::relational::{Column, ColumnType, Layout, SqlName, Table, PRIMARY_KEY_COLUMN};
 use crate::sql_value::SqlValue;
+
 
 /// Helper struct for retrieving entities from the database. With diesel, we
 /// can only run queries that return columns whose number and type are known
@@ -114,6 +115,10 @@ impl EntityData {
         }
     }
 
+    pub fn entity_type(&self) -> String {
+        self.entity.clone()
+    }
+
     /// Map the `EntityData` to an entity using the schema information
     /// in `Layout`
     pub fn to_entity(self, layout: &Layout) -> Result<Entity, StoreError> {
@@ -131,7 +136,10 @@ impl EntityData {
                     // Simply ignore keys that do not have an underlying table
                     // column; those will be things like the block_range that
                     // is used internally for versioning
-                    if let Some(column) = table.column(&SqlName::from_snake_case(key)).ok() {
+                    if key == "g$parent_id" {
+                        let value = Self::value_from_json(&ColumnType::String, json)?;
+                        entity.insert("g$parent_id".to_owned(), value);
+                    } else if let Some(column) = table.column(&SqlName::from_snake_case(key)).ok() {
                         let value = Self::value_from_json(&column.column_type, json)?;
                         if value != Value::Null {
                             entity.insert(column.field.clone(), value);
@@ -243,6 +251,7 @@ impl Comparison {
 /// instead of going straight to a sequential scan of the underlying table.
 /// We do this by writing the comparison `column op text` in a way that
 /// involves `left(column, STRING_PREFIX_SIZE)`
+#[derive(Constructor)]
 struct PrefixComparison<'a> {
     op: Comparison,
     column: &'a Column,
@@ -250,10 +259,6 @@ struct PrefixComparison<'a> {
 }
 
 impl<'a> PrefixComparison<'a> {
-    fn new(op: Comparison, column: &'a Column, text: &'a Value) -> Self {
-        PrefixComparison { op, column, text }
-    }
-
     fn push_column_prefix(column: &Column, mut out: AstPass<Pg>) -> QueryResult<()> {
         out.push_sql("left(");
         out.push_identifier(column.name.as_str())?;
@@ -739,23 +744,11 @@ impl<'a> QueryFragment<Pg> for QueryFilter<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Constructor)]
 pub struct FindQuery<'a> {
-    schema: &'a str,
     table: &'a Table,
     id: &'a str,
     block: BlockNumber,
-}
-
-impl<'a> FindQuery<'a> {
-    pub fn new(schema: &'a str, table: &'a Table, id: &'a str, block: BlockNumber) -> Self {
-        FindQuery {
-            schema,
-            table,
-            id,
-            block,
-        }
-    }
 }
 
 impl<'a> QueryFragment<Pg> for FindQuery<'a> {
@@ -769,15 +762,13 @@ impl<'a> QueryFragment<Pg> for FindQuery<'a> {
         out.push_bind_param::<Text, _>(&self.table.object)?;
         out.push_sql(" as entity, to_jsonb(e.*) as data\n");
         out.push_sql("  from ");
-        out.push_identifier(self.schema)?;
-        out.push_sql(".");
-        out.push_identifier(self.table.name.as_str())?;
+        out.push_sql(self.table.qualified_name.as_str());
         out.push_sql(" e\n where ");
         out.push_identifier(PRIMARY_KEY_COLUMN)?;
         out.push_sql(" = ");
         out.push_bind_param::<Text, _>(&self.id)?;
         out.push_sql(" and ");
-        BlockRangeContainsClause::new(self.block).walk_ast(out)
+        BlockRangeContainsClause::new("e.", self.block).walk_ast(out)
     }
 }
 
