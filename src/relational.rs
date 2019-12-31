@@ -15,10 +15,10 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::relational_queries::{EntityData, FilterQuery, FindQuery, QueryFilter};
+use crate::relational_queries::{EntityData, FilterQuery, FindQuery};
 use graph::prelude::{
-    format_err, BlockNumber, Entity, EntityChange, EntityChangeOperation, EntityCollection,
-    EntityFilter, EntityKey, EntityOrder, EntityRange, QueryExecutionError, StoreError, StoreEvent,
+    format_err, BlockNumber, Entity, EntityCollection,
+    EntityFilter, EntityOrder, EntityRange, QueryExecutionError, StoreEvent,
     SubgraphDeploymentId, ValueType,
 };
 
@@ -40,10 +40,6 @@ pub struct SqlName(String);
 impl SqlName {
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    pub fn quoted(&self) -> String {
-        format!("\"{}\"", self.0)
     }
 
     // Check that `name` matches the regular expression `/[A-Za-z][A-Za-z0-9_]*/`

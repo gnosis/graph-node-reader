@@ -18,7 +18,7 @@ use std::str::FromStr;
 use graph::data::store::scalar;
 use graph::prelude::{
     format_err, serde_json, Attribute, BlockNumber, Entity, EntityCollection, EntityFilter,
-    EntityKey, EntityLink, EntityOrder, EntityRange, EntityWindow, QueryExecutionError, StoreError,
+    EntityLink, EntityOrder, EntityRange, EntityWindow, QueryExecutionError, StoreError,
     Value, ValueType,
 };
 
