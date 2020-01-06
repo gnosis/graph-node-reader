@@ -20,8 +20,7 @@
 // for dynamic tables.
 
 use diesel::debug_query;
-use diesel::dsl::{any, sql};
-use diesel::pg::{Pg, PgConnection};
+use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
 use diesel::sql_types::{Jsonb, Text};
 use diesel::BoolExpressionMethods;
@@ -32,12 +31,12 @@ use std::sync::{Arc, Mutex};
 
 use graph::components::store::SubgraphDeploymentStore;
 use graph::prelude::{
-    format_err, serde_json, Entity, EntityFilter, QueryExecutionError, StoreError,
-    SubgraphDeploymentId, ValueType,
+    format_err, serde_json, BlockNumber, Entity, EntityCollection, EntityFilter, EntityOrder,
+    EntityRange, QueryExecutionError, StoreError, SubgraphDeploymentId, ValueType,
+    BLOCK_NUMBER_MAX,
 };
 
-use crate::block_range::BlockNumber;
-use crate::filter::build_filter;
+use crate::jsonb_queries::FilterQuery;
 use crate::relational::{IdType, Layout};
 use crate::store::Store;
 
@@ -252,27 +251,26 @@ pub(crate) fn make_storage_cache() -> StorageCache {
     Mutex::new(HashMap::new())
 }
 
-/// A connection into the database to handle entities which caches the
-/// mapping to actual database tables. Instances of this struct must not be
-/// cached across transactions as we do not track possible changes to
-/// entity storage, such as migrating a subgraph from the monolithic
-/// entities table to a split entities table
+/// A connection into the database to handle entities. The connection is
+/// specific to one subgraph, and can only handle entities from that subgraph
+/// or from the metadata subgraph. Attempts to access other subgraphs will
+/// generally result in a panic.
+///
+/// Instances of this struct must not be cached across transactions as there
+/// is no mechanism in place to notify other index nodes that a subgraph has
+/// been migrated
+#[derive(Constructor)]
 pub(crate) struct Connection {
     pub(crate) conn: PooledConnection<ConnectionManager<PgConnection>>,
     /// The storage of the subgraph we are dealing with; entities
     /// go into this
     storage: Arc<Storage>,
+    /// The layout of the subgraph of subgraphs where we keep subgraph
+    /// metadata
+    _metadata: Arc<Storage>,
 }
 
 impl Connection {
-    pub(crate) fn new(
-        conn: PooledConnection<ConnectionManager<PgConnection>>,
-        storage: Arc<Storage>,
-        _metadata: Arc<Storage>,
-    ) -> Connection {
-        Connection { conn, storage }
-    }
-
     pub(crate) fn find(
         &self,
         entity: &String,
@@ -287,17 +285,28 @@ impl Connection {
 
     pub(crate) fn query(
         &self,
-        entity_types: Vec<String>,
+        collection: EntityCollection,
         filter: Option<EntityFilter>,
-        order: Option<(String, ValueType, &str)>,
-        first: Option<u32>,
-        skip: u32,
+        order: Option<(String, ValueType, EntityOrder)>,
+        range: EntityRange,
         block: BlockNumber,
     ) -> Result<Vec<Entity>, QueryExecutionError> {
         match &*self.storage {
-            Storage::Json(json) => json.query(&self.conn, entity_types, filter, order, first, skip),
+            Storage::Json(json) => {
+                // JSON storage can only query at the latest block
+                if block != BLOCK_NUMBER_MAX {
+                    return Err(StoreError::QueryExecutionError(
+                        "This subgraph uses JSONB storage, which does not \
+                         support querying at a specific block height. Redeploy \
+                         a new version of this subgraph to enable this feature."
+                            .to_owned(),
+                    )
+                    .into());
+                }
+                json.query(&self.conn, collection, filter, order, range)
+            }
             Storage::Relational(layout) => {
-                layout.query(&self.conn, entity_types, filter, order, first, skip, block)
+                layout.query(&self.conn, collection, filter, order, range, block)
             }
         }
     }
@@ -333,7 +342,7 @@ impl JsonStorage {
         &self,
         conn: &PgConnection,
         entity: &str,
-        id: &String,
+        id: &str,
     ) -> Result<Option<Entity>, StoreError> {
         let entities = self.clone();
         entities
@@ -350,87 +359,17 @@ impl JsonStorage {
     fn query(
         &self,
         conn: &PgConnection,
-        entity_types: Vec<String>,
+        collection: EntityCollection,
         filter: Option<EntityFilter>,
-        order: Option<(String, ValueType, &str)>,
-        first: Option<u32>,
-        skip: u32,
+        order: Option<(String, ValueType, EntityOrder)>,
+        range: EntityRange,
     ) -> Result<Vec<Entity>, QueryExecutionError> {
-        let entities = self.clone();
-        let mut query = if entity_types.len() == 1 {
-            // If there is only one entity_type, which is the case in all
-            // queries that do not involve interfaces, leaving out `any`
-            // lets Postgres use the primary key index on the entities table
-            let entity_type = entity_types.first().unwrap();
-            entities
-                .table
-                .select((&self.data, &self.entity))
-                .filter((&self.entity).eq(entity_type))
-                .into_boxed::<Pg>()
-        } else {
-            entities
-                .table
-                .select((&self.data, &self.entity))
-                .filter((&self.entity).eq(any(entity_types)))
-                .into_boxed::<Pg>()
-        };
-
-        if let Some(filter) = filter {
-            let filter = build_filter(filter).map_err(|e| {
-                QueryExecutionError::FilterNotSupportedError(format!("{}", e.value), e.filter)
-            })?;
-            query = query.filter(filter);
-        }
-
-        if let Some((attribute, value_type, direction)) = order {
-            let cast = match value_type {
-                ValueType::BigInt | ValueType::BigDecimal => "::numeric",
-                ValueType::Boolean => "::boolean",
-                ValueType::Bytes => "",
-                ValueType::ID => "",
-                ValueType::Int => "::bigint",
-                ValueType::String => "",
-                ValueType::List => {
-                    return Err(QueryExecutionError::OrderByNotSupportedForType(
-                        "List".to_string(),
-                    ));
-                }
-            };
-
-            query = match value_type {
-                ValueType::String => query.order(
-                    sql::<Text>("left(data ->")
-                        .bind::<Text, _>(attribute)
-                        .sql("->> 'data', ")
-                        .sql(&STRING_PREFIX_SIZE.to_string())
-                        .sql(") ")
-                        .sql(direction)
-                        .sql(" NULLS LAST"),
-                ),
-                _ => query.order(
-                    sql::<Text>("(data ->")
-                        .bind::<Text, _>(attribute)
-                        .sql("->> 'data')")
-                        .sql(cast)
-                        .sql(" ")
-                        .sql(direction)
-                        .sql(" NULLS LAST"),
-                ),
-            };
-        }
-        query = query.then_order_by(entities.id.asc());
-
-        if let Some(first) = first {
-            query = query.limit(first as i64);
-        }
-        if skip > 0 {
-            query = query.offset(skip as i64);
-        }
+        let query = FilterQuery::new(&self.table, collection, filter, order, range)?;
 
         let query_debug_info = debug_query(&query).to_string();
 
         let values = query
-            .load::<(serde_json::Value, String)>(conn)
+            .load::<(String, serde_json::Value, String)>(conn)
             .map_err(|e| {
                 QueryExecutionError::ResolveEntitiesError(format!(
                     "{}, query = {:?}",
@@ -439,7 +378,7 @@ impl JsonStorage {
             })?;
         values
             .into_iter()
-            .map(|(value, entity_type)| {
+            .map(|(_, value, entity_type)| {
                 entity_from_json(value, &entity_type).map_err(QueryExecutionError::from)
             })
             .collect()

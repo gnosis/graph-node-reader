@@ -15,13 +15,11 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::relational_queries::{EntityData, FilterQuery, FindQuery, QueryFilter};
+use crate::relational_queries::{EntityData, FilterQuery, FindQuery};
 use graph::prelude::{
-    format_err, Entity, EntityFilter, QueryExecutionError, StoreError, SubgraphDeploymentId,
-    ValueType,
+    format_err, BlockNumber, Entity, EntityCollection, EntityFilter, EntityOrder, EntityRange,
+    QueryExecutionError, StoreError, SubgraphDeploymentId, ValueType,
 };
-
-use crate::block_range::BlockNumber;
 
 /// A string we use as a SQL name for a table or column. The important thing
 /// is that SQL names are snake cased. Using this type makes it easier to
@@ -35,7 +33,7 @@ use crate::block_range::BlockNumber;
 /// Postgres, we would create the same table twice. We consider this case
 /// to be pathological and so unlikely in practice that we do not try to work
 /// around it in the application.
-#[derive(Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub struct SqlName(String);
 
 impl SqlName {
@@ -78,6 +76,10 @@ impl SqlName {
 
     pub fn from_snake_case(s: String) -> Self {
         SqlName(s)
+    }
+
+    pub fn qualified_name(schema: &str, name: &SqlName) -> Self {
+        SqlName(format!("\"{}\".\"{}\"", schema, name.as_str()))
     }
 }
 
@@ -256,7 +258,7 @@ impl Layout {
         block: BlockNumber,
     ) -> Result<Option<Entity>, StoreError> {
         let table = self.table_for_entity(entity)?;
-        FindQuery::new(&self.schema, table.as_ref(), id, block)
+        FindQuery::new(table.as_ref(), id, block)
             .get_result::<EntityData>(conn)
             .optional()?
             .map(|entity_data| entity_data.to_entity(self))
@@ -267,50 +269,13 @@ impl Layout {
     pub fn query(
         &self,
         conn: &PgConnection,
-        entity_types: Vec<String>,
+        collection: EntityCollection,
         filter: Option<EntityFilter>,
-        order: Option<(String, ValueType, &str)>,
-        first: Option<u32>,
-        skip: u32,
+        order: Option<(String, ValueType, EntityOrder)>,
+        range: EntityRange,
         block: BlockNumber,
     ) -> Result<Vec<Entity>, QueryExecutionError> {
-        let filter = filter.as_ref();
-        let table_filter_pairs = entity_types
-            .into_iter()
-            .map(|entity| {
-                self.table_for_entity(&entity)
-                    .map(|rc| rc.as_ref())
-                    .and_then(|table| {
-                        filter
-                            .map(|filter| QueryFilter::new(filter, table))
-                            .transpose()
-                            .map(|filter| (table, filter))
-                    })
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        let first = first.map(|first| first.to_string());
-        let skip = if skip == 0 {
-            None
-        } else {
-            Some(skip.to_string())
-        };
-
-        // Get the name of the column we order by; if there is more than one
-        // table, we are querying an interface, and the order is on an attribute
-        // in that interface so that all tables have a column for that. It is
-        // therefore enough to just look at the first table to get the name
-        let order = match (order, table_filter_pairs.first()) {
-            (_, None) => {
-                unreachable!("an entity query always contains at least one entity type/table");
-            }
-            (Some((ref attribute, _, direction)), Some((table, _))) => {
-                let column = table.column_for_field(&attribute)?;
-                Some((&column.name, direction))
-            }
-            (None, _) => None,
-        };
-
-        let query = FilterQuery::new(&self.schema, table_filter_pairs, order, first, skip, block);
+        let query = FilterQuery::new(&self, collection, filter.as_ref(), order, range, block)?;
         let query_debug_info = query.clone();
 
         let values = query.load::<EntityData>(conn).map_err(|e| {
@@ -367,11 +332,10 @@ impl ColumnType {
         if enums.contains_key(&*name) {
             // We do things this convoluted way to make sure field_type gets
             // snakecased, but the `.` must stay a `.`
-            return Ok(ColumnType::Enum(SqlName(format!(
-                "\"{}\".\"{}\"",
+            return Ok(ColumnType::Enum(SqlName::qualified_name(
                 schema,
-                SqlName::from(name)
-            ))));
+                &SqlName::from(name),
+            )));
         }
 
         // It is not an enum, and therefore one of our builtin primitive types
@@ -452,6 +416,10 @@ pub struct Table {
     /// version of `object`
     pub name: SqlName,
 
+    /// The table name qualified with the schema in which the table lives,
+    /// `schema.table`
+    pub qualified_name: SqlName,
+
     pub columns: Vec<Column>,
     /// The position of this table in all the tables for this layout; this
     /// is really only needed for the tests to make the names of indexes
@@ -480,6 +448,7 @@ impl Table {
         let table = Table {
             object: defn.name.clone(),
             name: table_name.clone(),
+            qualified_name: SqlName::qualified_name(schema, &table_name),
             columns,
             position,
         };
